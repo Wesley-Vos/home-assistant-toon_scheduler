@@ -48,7 +48,7 @@ import pytz as pytz
 BASE_URL = "http://{0}:{1}/schedule/config_happ_thermstat.xml"
 _LOGGER = logging.getLogger(__name__)
 
-MIN_TIME_BETWEEN_UPDATES = timedelta(minutes=10)
+MIN_TIME_BETWEEN_UPDATES = timedelta(minutes=1)
 DEFAULT_NAME = "Toon "
 
 SENSOR_LIST = {
