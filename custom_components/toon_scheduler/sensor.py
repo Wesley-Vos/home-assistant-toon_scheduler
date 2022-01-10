@@ -9,14 +9,6 @@ sensor:
     host: IP_ADDRESS
     port: 80
     scan_interval: 10
-    resources:
-        - boilersetpoint
-        - boilerintemp
-        - boilerouttemp
-        - boilerpressure
-        - boilermodulationlevel
-        - roomtemp
-        - roomtempsetpoint
 """
 import asyncio
 import logging
@@ -48,77 +40,50 @@ from homeassistant.const import (
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import Throttle
 
-BASE_URL = "http://{0}:{1}/boilerstatus/boilervalues.txt"
+BASE_URL = "http://{0}:{1}/schedule/config_happ_thermstat.xml"
 _LOGGER = logging.getLogger(__name__)
 
-MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=10)
+MIN_TIME_BETWEEN_UPDATES = timedelta(minutes=10)
 DEFAULT_NAME = "Toon "
 
 SENSOR_LIST = {
-    "boilersetpoint",
-    "boilerintemp",
-    "boilerouttemp",
-    "boilerpressure",
-    "boilermodulationlevel",
-    "roomtemp",
-    "roomtempsetpoint",
+    "toon_huidig_programma",
+    "toon_volgend_programma",
+    "toon_volgend_volgend_programma",
+    "toon_volgend_volgend_volgend_programma"
 }
 
 SENSOR_TYPES: Final[tuple[SensorEntityDescription, ...]] = (
     SensorEntityDescription(
-        key="boilersetpoint",
-        name="Boiler SetPoint",
+        key="huidig_programma",
+        name="Huidig programma",
+        icon="mdi:calendar",
+        native_unit_of_measurement=TEMP_CELSIUS,
+        device_class=DEVICE_CLASS_TEMPERATURE,
+        state_class=STATE_CLASS_MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="volgend_programma",
+        name="Volgend programma",
         icon="mdi:thermometer",
         native_unit_of_measurement=TEMP_CELSIUS,
         device_class=DEVICE_CLASS_TEMPERATURE,
         state_class=STATE_CLASS_MEASUREMENT,
     ),
     SensorEntityDescription(
-        key="boilerintemp",
-        name="Boiler InTemp",
-        icon="mdi:thermometer",
-        native_unit_of_measurement=TEMP_CELSIUS,
-        device_class=DEVICE_CLASS_TEMPERATURE,
-        state_class=STATE_CLASS_MEASUREMENT,
-    ),
-    SensorEntityDescription(
-        key="boilerouttemp",
-        name="Boiler OutTemp",
+        key="volgend_volgend_programma",
+        name="Volgend volgend programma",
         icon="mdi:flash",
         native_unit_of_measurement=TEMP_CELSIUS,
         device_class=DEVICE_CLASS_TEMPERATURE,
         state_class=STATE_CLASS_MEASUREMENT,
     ),
     SensorEntityDescription(
-        key="boilerpressure",
-        name="Boiler Pressure",
+        key="volgend_volgend_volgend_programma",
+        name="Volgend volgend volgend programma",
         icon="mdi:gauge",
         native_unit_of_measurement=PRESSURE_BAR,
         device_class=DEVICE_CLASS_PRESSURE,
-        state_class=STATE_CLASS_MEASUREMENT,
-    ),
-    SensorEntityDescription(
-        key="boilermodulationlevel",
-        name="Boiler Modulation",
-        icon="mdi:fire",
-        native_unit_of_measurement=PERCENTAGE,
-        device_class=DEVICE_CLASS_POWER_FACTOR,
-        state_class=STATE_CLASS_MEASUREMENT,
-    ),
-    SensorEntityDescription(
-        key="roomtemp",
-        name="Room Temp",
-        icon="mdi:thermometer",
-        native_unit_of_measurement=TEMP_CELSIUS,
-        device_class=DEVICE_CLASS_TEMPERATURE,
-        state_class=STATE_CLASS_MEASUREMENT,
-    ),
-    SensorEntityDescription(
-        key="roomtempsetpoint",
-        name="Room Temp SetPoint",
-        icon="mdi:thermometer",
-        native_unit_of_measurement=TEMP_CELSIUS,
-        device_class=DEVICE_CLASS_TEMPERATURE,
         state_class=STATE_CLASS_MEASUREMENT,
     ),
 )
@@ -127,33 +92,30 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
         vol.Required(CONF_HOST): cv.string,
-        vol.Optional(CONF_PORT, default=80): cv.positive_int,
-        vol.Required(CONF_RESOURCES, default=list(SENSOR_LIST)): vol.All(
-            cv.ensure_list, [vol.In(SENSOR_LIST)]
+        vol.Optional(CONF_PORT, default=80): cv.positive_int
         ),
     }
 )
 
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Setup the Toon boilerstatus sensors."""
+    """Setup the Toon Scheduler sensors."""
 
     session = async_get_clientsession(hass)
-    data = ToonBoilerStatusData(session, config.get(CONF_HOST), config.get(CONF_PORT))
+    data = ToonSchedulerData(session, config.get(CONF_HOST), config.get(CONF_PORT))
     prefix = config.get(CONF_NAME)
     await data.async_update()
 
     entities = []
     for description in SENSOR_TYPES:
-        if description.key in config[CONF_RESOURCES]:
-            _LOGGER.debug("Adding Toon Boiler Status sensor: %s", description.name)
-            sensor = ToonBoilerStatusSensor(prefix, description, data)
-            entities.append(sensor)
+        _LOGGER.debug("Adding Toon Scheduler sensor: %s", description.name)
+        sensor = ToonSchedulerSensor(prefix, description, data)
+        entities.append(sensor)
     async_add_entities(entities, True)
 
 
 # pylint: disable=abstract-method
-class ToonBoilerStatusData:
+class ToonSchedulerData:
     """Handle Toon object and limit updates."""
 
     def __init__(self, session, host, port):
@@ -161,6 +123,9 @@ class ToonBoilerStatusData:
 
         self._session = session
         self._url = BASE_URL.format(host, port)
+        self._data = None
+        
+    def _process_data(self):
         self._data = None
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
@@ -188,6 +153,7 @@ class ToonBoilerStatusData:
         try:
             self._data = await response.json(content_type="text/plain")
             _LOGGER.debug("Data received from Toon: %s", self._data)
+            self._process_data()
         except Exception as err:
             _LOGGER.error("Cannot parse data received from Toon: %s", err)
             self._data = None
@@ -199,8 +165,8 @@ class ToonBoilerStatusData:
         return self._data
 
 
-class ToonBoilerStatusSensor(SensorEntity):
-    """Representation of a Toon Boilerstatus sensor."""
+class ToonSchedulerSensor(SensorEntity):
+    """Representation of a Toon Scheduler sensor."""
 
     def __init__(self, prefix, description: SensorEntityDescription, data):
         """Initialize the sensor."""
@@ -229,49 +195,16 @@ class ToonBoilerStatusSensor(SensorEntity):
     def extra_state_attributes(self):
         """Return the state attributes of this device."""
         attr = {}
-        if self._last_updated is not None:
-            attr["Last Updated"] = self._last_updated
+        attr["Last Updated"] = None
         return attr
 
     async def async_update(self):
         """Get the latest data and use it to update our sensor state."""
 
         await self._data.async_update()
-        boiler = self._data.latest_data
+        data = self._data.latest_data
 
-        if boiler:
-            if "sampleTime" in boiler and boiler["sampleTime"]:
-                self._last_updated = boiler["sampleTime"]
+        self._last_updated = None
+        self._state = None
 
-            if self._type == "boilersetpoint":
-                if "boilerSetpoint" in boiler and boiler["boilerSetpoint"]:
-                    self._state = float(boiler["boilerSetpoint"])
-
-            elif self._type == "boilerintemp":
-                if "boilerInTemp" in boiler and boiler["boilerInTemp"]:
-                    self._state = float(boiler["boilerInTemp"])
-
-            elif self._type == "boilerouttemp":
-                if "boilerOutTemp" in boiler and boiler["boilerOutTemp"]:
-                    self._state = float(boiler["boilerOutTemp"])
-
-            elif self._type == "boilerpressure":
-                if "boilerPressure" in boiler and boiler["boilerPressure"]:
-                    self._state = float(boiler["boilerPressure"])
-
-            elif self._type == "boilermodulationlevel":
-                if (
-                    "boilerModulationLevel" in boiler
-                    and boiler["boilerModulationLevel"]
-                ):
-                    self._state = float(boiler["boilerModulationLevel"])
-
-            elif self._type == "roomtemp":
-                if "roomTemp" in boiler and boiler["roomTemp"]:
-                    self._state = float(boiler["roomTemp"])
-
-            elif self._type == "roomtempsetpoint":
-                if "roomTempSetpoint" in boiler and boiler["roomTempSetpoint"]:
-                    self._state = float(boiler["roomTempSetpoint"])
-
-            _LOGGER.debug("Device: %s State: %s", self._type, self._state)
+        _LOGGER.debug("Device: %s State: %s", self._type, self._state)
