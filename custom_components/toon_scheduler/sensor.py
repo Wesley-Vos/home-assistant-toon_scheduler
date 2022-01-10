@@ -1,11 +1,11 @@
 """
-Support for reading Opentherm boiler status data using Toon thermostat's ketelmodule.
+Support for reading Toon Scheduling data
 Only works for rooted Toon.
 
 configuration.yaml
 
 sensor:
-    - platform: toon_boilerstatus
+    - platform: toon_scheduler
     host: IP_ADDRESS
     port: 80
     scan_interval: 10
@@ -15,6 +15,7 @@ import logging
 from datetime import timedelta
 from typing import Final
 
+import xmltodict
 import aiohttp
 import async_timeout
 import homeassistant.helpers.config_validation as cv
@@ -39,6 +40,10 @@ from homeassistant.const import (
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import Throttle
+from datetime import datetime, timedelta
+from functools import total_ordering
+
+import pytz as pytz
 
 BASE_URL = "http://{0}:{1}/schedule/config_happ_thermstat.xml"
 _LOGGER = logging.getLogger(__name__)
@@ -47,44 +52,32 @@ MIN_TIME_BETWEEN_UPDATES = timedelta(minutes=10)
 DEFAULT_NAME = "Toon "
 
 SENSOR_LIST = {
-    "toon_huidig_programma",
-    "toon_volgend_programma",
-    "toon_volgend_volgend_programma",
-    "toon_volgend_volgend_volgend_programma"
+    "toon_scheduler_1",
+    "toon_scheduler_2",
+    "toon_scheduler_3",
+    "toon_scheduler_4"
 }
 
 SENSOR_TYPES: Final[tuple[SensorEntityDescription, ...]] = (
     SensorEntityDescription(
-        key="huidig_programma",
+        key="1",
         name="Huidig programma",
-        icon="mdi:calendar",
-        native_unit_of_measurement=TEMP_CELSIUS,
-        device_class=DEVICE_CLASS_TEMPERATURE,
-        state_class=STATE_CLASS_MEASUREMENT,
+        icon="mdi:calendar-clock"
     ),
     SensorEntityDescription(
-        key="volgend_programma",
+        key="2",
         name="Volgend programma",
-        icon="mdi:thermometer",
-        native_unit_of_measurement=TEMP_CELSIUS,
-        device_class=DEVICE_CLASS_TEMPERATURE,
-        state_class=STATE_CLASS_MEASUREMENT,
+        icon="mdi:calendar-clock"
     ),
     SensorEntityDescription(
-        key="volgend_volgend_programma",
+        key="3",
         name="Volgend volgend programma",
-        icon="mdi:flash",
-        native_unit_of_measurement=TEMP_CELSIUS,
-        device_class=DEVICE_CLASS_TEMPERATURE,
-        state_class=STATE_CLASS_MEASUREMENT,
+        icon="mdi:calendar-clock"
     ),
     SensorEntityDescription(
-        key="volgend_volgend_volgend_programma",
+        key="4",
         name="Volgend volgend volgend programma",
-        icon="mdi:gauge",
-        native_unit_of_measurement=PRESSURE_BAR,
-        device_class=DEVICE_CLASS_PRESSURE,
-        state_class=STATE_CLASS_MEASUREMENT,
+        icon="mdi:calendar-clock"
     ),
 )
 
@@ -92,8 +85,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
         vol.Required(CONF_HOST): cv.string,
-        vol.Optional(CONF_PORT, default=80): cv.positive_int
-        ),
+        vol.Optional(CONF_PORT, default=80): cv.positive_int,
     }
 )
 
@@ -124,9 +116,6 @@ class ToonSchedulerData:
         self._session = session
         self._url = BASE_URL.format(host, port)
         self._data = None
-        
-    def _process_data(self):
-        self._data = None
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     async def async_update(self):
@@ -151,9 +140,9 @@ class ToonSchedulerData:
             return
 
         try:
-            self._data = await response.json(content_type="text/plain")
+            self._data = await response.text()
             _LOGGER.debug("Data received from Toon: %s", self._data)
-            self._process_data()
+            self._data = ToonSync(self._process_data())
         except Exception as err:
             _LOGGER.error("Cannot parse data received from Toon: %s", err)
             self._data = None
@@ -163,6 +152,10 @@ class ToonSchedulerData:
     def latest_data(self):
         """Return the latest data object."""
         return self._data
+
+    def _process_data(self):
+        response_dict = xmltodict.parse(self._data).get('Config').get('device')
+        return [r for r in response_dict if "schedule" in r][0].get('schedule').get('entry')
 
 
 class ToonSchedulerSensor(SensorEntity):
@@ -175,14 +168,14 @@ class ToonSchedulerSensor(SensorEntity):
         self._prefix = prefix
         self._type = self.entity_description.key
         self._attr_icon = self.entity_description.icon
-        self._attr_name = self._prefix + self.entity_description.name
+        self._attr_name = "toon_scheduler_" + self._type
         self._attr_state_class = self.entity_description.state_class
         self._attr_native_unit_of_measurement = (
             self.entity_description.native_unit_of_measurement
         )
         self._attr_device_class = self.entity_description.device_class
         self._attr_unique_id = f"{self._prefix}_{self._type}"
-
+        self._total_state = None
         self._state = None
         self._last_updated = None
 
@@ -195,7 +188,10 @@ class ToonSchedulerSensor(SensorEntity):
     def extra_state_attributes(self):
         """Return the state attributes of this device."""
         attr = {}
-        attr["Last Updated"] = None
+        attr["start_day"] = self._total_state.ha_start_day
+        attr["start_time"] = self._total_state.ha_start_time
+        attr["end_day"] = self._total_state.ha_end_day
+        attr["end_time"] = self._total_state.ha_end_time
         return attr
 
     async def async_update(self):
@@ -204,7 +200,106 @@ class ToonSchedulerSensor(SensorEntity):
         await self._data.async_update()
         data = self._data.latest_data
 
-        self._last_updated = None
-        self._state = None
+        self._total_state = data.get_schedule(int(self._type) - 1)
+        self._state = self._total_state.state
+        #self._state = 1
 
         _LOGGER.debug("Device: %s State: %s", self._type, self._state)
+
+
+class ToonSync:
+    def __init__(self, data):
+        self.schedule = []
+        for d in data:
+            item = ToonScheduleItem(d.get('startDayOfWeek'), d.get('endDayOfWeek'), d.get('startHour'),
+                                    d.get('startMin'),
+                                    d.get('endHour'), d.get('endMin'), d.get('targetState'))
+            self.schedule.append(item)
+        self.schedule.sort()
+        self.data = []
+        self._store_data()
+
+    def _current_item_idx(self):
+        today = datetime.today().weekday()
+        time = datetime.now(pytz.timezone('Europe/Amsterdam')).time()
+
+        for idx, item in enumerate(self.schedule):
+            # start_day and end_day both today
+            if int(item.start_day) == today and int(item.end_day) == today and item.start_dt < time < item.end_dt:
+                return idx
+            # start_day is before today and end_day is today
+            elif int(item.start_day) < today and int(item.end_day) == today and time < item.end_dt:
+                return idx
+            # start_day is today and end_day is after today
+            elif int(item.start_day) == today and int(item.end_day) > today and time > item.start_dt:
+                return idx
+                # start_day is before today and end_day is after today
+            elif int(item.start_day) < today < int(item.end_day):
+                return idx
+            # start_day is sunday (6) and end_day is monday (0)
+            elif int(item.start_day) > int(item.end_day) and (
+                    (int(item.start_day) == today and time > item.start_dt) or (
+                    int(item.end_day) == today and time < item.end_dt)):
+                return idx
+
+    def _store_data(self):
+        current_idx = self._current_item_idx()
+        for _ in range(4):
+            self.data.append(self.schedule[current_idx])
+            current_idx = (current_idx + 1) % len(self.schedule)
+    
+    def get_schedule(self, i):
+        return self.data[i]
+
+
+def leading_zero(x):
+    return x if int(x) >= 10 else "0" + x
+
+
+def format_time(hour, minute):
+    return leading_zero(hour) + ":" + leading_zero(minute)
+
+
+@total_ordering
+class ToonScheduleItem:
+    def __init__(self, start_day, end_day, start_hour, start_min, end_hour, end_min, state):
+        self.start_day = str((int(start_day) + 6) % 7)
+        self.end_day = str((int(end_day) + 6) % 7)
+        self.start_time = format_time(start_hour, start_min)
+        self.end_time = format_time(end_hour, end_min)
+        self.start_dt = datetime.strptime(self.start_time, "%H:%M").time()
+        self.end_dt = datetime.strptime(self.end_time, "%H:%M").time()
+        self.state = state
+        self._toState()
+
+    def __str__(self):
+        return str(self.start_day) + " - " + str(self.end_day) + " - " + str(self.start_time) + " - " + str(
+            self.end_time) + " - " + str(self.state)
+
+    def __lt__(self, other):
+        return (self.start_day < other.start_day) or (
+                self.start_day == other.start_day and self.start_time < other.start_time)
+
+    def __eq__(self, other):
+        return self.start_day == other.start_day and self.end_day == other.end_day and self.start_time == other.start_time and self.end_time == other.end_time
+
+    def _toState(self):
+        states = ["comfort", "thuis", "slapen", "weg"]
+        days = ["eergisteren", "gisteren", "vandaag", "morgen", "overmorgen"]
+        today = datetime.now(pytz.timezone('Europe/Amsterdam')).weekday()
+
+        try:
+            self.state = states[int(self.state)]
+            self.ha_start_day = days[(int(self.start_day) - today + 6) % 6 + 2]
+            self.ha_end_day = days[(int(self.end_day) - today + 6) % 6 + 2]
+            self.ha_start_time = self.start_time
+            self.ha_end_time = self.end_time
+        except IndexError:
+            _LOGGER.error("Encountered index error while generating states")
+            self.state = None
+            self.state = None
+            self.ha_start_day = None
+            self.ha_end_day = None
+            self.ha_start_time = None
+            self.ha_end_time = None
+
