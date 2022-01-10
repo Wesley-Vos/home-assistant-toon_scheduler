@@ -139,14 +139,14 @@ class ToonSchedulerData:
             self._data = None
             return
 
-        try:
-            self._data = await response.text()
-            _LOGGER.debug("Data received from Toon: %s", self._data)
-            self._data = ToonSync(self._process_data())
-        except Exception as err:
-            _LOGGER.error("Cannot parse data received from Toon: %s", err)
-            self._data = None
-            return
+        #try:
+        self._data = await response.text()
+        _LOGGER.debug("Data received from Toon: %s", self._data)
+        self._data = ToonSync(self._process_data())
+        #except Exception as err:
+        #    _LOGGER.error("Cannot parse data received from Toon: %s", err)
+        #    self._data = None
+        #    return
 
     @property
     def latest_data(self):
@@ -286,20 +286,19 @@ class ToonScheduleItem:
     def _toState(self):
         states = ["comfort", "thuis", "slapen", "weg"]
         days = ["eergisteren", "gisteren", "vandaag", "morgen", "overmorgen"]
+        weekdays = ["maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"]
         today = datetime.now(pytz.timezone('Europe/Amsterdam')).weekday()
 
+        self.state = states[int(self.state)]
         try:
-            self.state = states[int(self.state)]
             self.ha_start_day = days[(int(self.start_day) - today + 6) % 6 + 2]
-            self.ha_end_day = days[(int(self.end_day) - today + 6) % 6 + 2]
-            self.ha_start_time = self.start_time
-            self.ha_end_time = self.end_time
         except IndexError:
-            _LOGGER.error("Encountered index error while generating states")
-            self.state = None
-            self.state = None
-            self.ha_start_day = None
-            self.ha_end_day = None
-            self.ha_start_time = None
-            self.ha_end_time = None
-
+            self.ha_start_day = weekdays[today]
+        
+        try:
+            self.ha_end_day = days[(int(self.end_day) - today + 6) % 6 + 2]
+        except IndexError:
+            self.ha_end_day = weekdays[today]
+        
+        self.ha_start_time = self.start_time
+        self.ha_end_time = self.end_time
