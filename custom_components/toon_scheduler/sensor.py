@@ -11,6 +11,7 @@ sensor:
     scan_interval: 10
 """
 import asyncio
+import json
 import logging
 from datetime import timedelta
 from typing import Final
@@ -45,7 +46,7 @@ from functools import total_ordering
 
 import pytz as pytz
 
-BASE_URL = "http://{0}:{1}/schedule/config_happ_thermstat.xml"
+BASE_URL = "http://{0}:{1}/happ_thermstat?action=getWeeklyList"
 _LOGGER = logging.getLogger(__name__)
 
 MIN_TIME_BETWEEN_UPDATES = timedelta(minutes=1)
@@ -130,32 +131,36 @@ class ToonSchedulerData:
             _LOGGER.error("Cannot poll Toon using url: %s", self._url)
             return
         except asyncio.TimeoutError:
-            _LOGGER.error(
-                "Timeout error occurred while polling Toon using url: %s", self._url
-            )
+            _LOGGER.error("Timeout error occurred while polling Toon using url: %s", self._url)
             return
         except Exception as err:
             _LOGGER.error("Unknown error occurred while polling Toon: %s", err)
             self._data = None
             return
 
-        #try:
-        self._data = await response.text()
-        _LOGGER.debug("Data received from Toon: %s", self._data)
-        self._data = ToonSync(self._process_data())
-        #except Exception as err:
-        #    _LOGGER.error("Cannot parse data received from Toon: %s", err)
-        #    self._data = None
-        #    return
+        try:
+            self._data = await response.text()
+            _LOGGER.debug("Data received from Toon: %s", self._data)
+
+            self._data = self._data \
+                .replace("targetState", '"targetState"') \
+                .replace("weekDay", '"weekDay"') \
+                .replace("startTimeT", '"startTimeT"') \
+                .replace("endTimeT", '"endTimeT"') \
+                .replace("'", '"') \
+                .replace("result", '"result"') \
+                .replace("programs", '"programs"')
+            self._data = json.loads(self._data)
+            self._data = Schedule(self._data["programs"])
+        except Exception as err:
+            _LOGGER.error("Cannot parse data received from Toon: %s", err)
+            self._data = None
+            return
 
     @property
     def latest_data(self):
         """Return the latest data object."""
         return self._data
-
-    def _process_data(self):
-        response_dict = xmltodict.parse(self._data).get('Config').get('device')
-        return [r for r in response_dict if "schedule" in r][0].get('schedule').get('entry')
 
 
 class ToonSchedulerSensor(SensorEntity):
@@ -175,7 +180,6 @@ class ToonSchedulerSensor(SensorEntity):
         )
         self._attr_device_class = self.entity_description.device_class
         self._attr_unique_id = f"{self._prefix}_{self._type}"
-        self._total_state = None
         self._state = None
         self._last_updated = None
 
@@ -187,118 +191,53 @@ class ToonSchedulerSensor(SensorEntity):
     @property
     def extra_state_attributes(self):
         """Return the state attributes of this device."""
-        attr = {}
-        attr["start_day"] = self._total_state.ha_start_day
-        attr["start_time"] = self._total_state.ha_start_time
-        attr["end_day"] = self._total_state.ha_end_day
-        attr["end_time"] = self._total_state.ha_end_time
-        return attr
+        return self._data.latest_data.get_schedule(int(self._type)).get_ha_attrs()
 
     async def async_update(self):
         """Get the latest data and use it to update our sensor state."""
 
         await self._data.async_update()
-        data = self._data.latest_data
-
-        self._total_state = data.get_schedule(int(self._type) - 1)
-        self._state = self._total_state.state
-        #self._state = 1
-
+        self._state = self._data.latest_data.get_schedule(int(self._type)).get_ha_state()
         _LOGGER.debug("Device: %s State: %s", self._type, self._state)
 
 
-class ToonSync:
+class Schedule:
+    STATES = {"Sleep": "slapen", "Active": "thuis", "Relax": "comfort", "Away": "weg"}
+
+    WEEKDAYS = ["zondag", "maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag"]
+    RELATIVE_DAYS = ["vandaag", "morgen", "overmorgen"]
+
     def __init__(self, data):
-        self.schedule = []
-        for d in data:
-            item = ToonScheduleItem(d.get('startDayOfWeek'), d.get('endDayOfWeek'), d.get('startHour'),
-                                    d.get('startMin'),
-                                    d.get('endHour'), d.get('endMin'), d.get('targetState'))
-            self.schedule.append(item)
-        self.schedule.sort()
-        self.data = []
-        self._store_data()
+        self._schedule = list(map(self.ScheduleItem, data))
+        self._schedule.sort()
 
-    def _current_item_idx(self):
-        today = datetime.today().weekday()
-        time = datetime.now(pytz.timezone('Europe/Amsterdam')).time()
-
-        for idx, item in enumerate(self.schedule):
-            # start_day and end_day both today
-            if int(item.start_day) == today and int(item.end_day) == today and item.start_dt < time < item.end_dt:
-                return idx
-            # start_day is before today and end_day is today
-            elif int(item.start_day) < today and int(item.end_day) == today and time < item.end_dt:
-                return idx
-            # start_day is today and end_day is after today
-            elif int(item.start_day) == today and int(item.end_day) > today and time > item.start_dt:
-                return idx
-                # start_day is before today and end_day is after today
-            elif int(item.start_day) < today < int(item.end_day):
-                return idx
-            # start_day is sunday (6) and end_day is monday (0)
-            elif int(item.start_day) > int(item.end_day) and (
-                    (int(item.start_day) == today and time > item.start_dt) or (
-                    int(item.end_day) == today and time < item.end_dt)):
-                return idx
-
-    def _store_data(self):
-        current_idx = self._current_item_idx()
-        for _ in range(4):
-            self.data.append(self.schedule[current_idx])
-            current_idx = (current_idx + 1) % len(self.schedule)
-    
     def get_schedule(self, i):
-        return self.data[i]
-
-
-def leading_zero(x):
-    return x if int(x) >= 10 else "0" + x
-
-
-def format_time(hour, minute):
-    return leading_zero(hour) + ":" + leading_zero(minute)
-
-
-@total_ordering
-class ToonScheduleItem:
-    def __init__(self, start_day, end_day, start_hour, start_min, end_hour, end_min, state):
-        self.start_day = str((int(start_day) + 6) % 7)
-        self.end_day = str((int(end_day) + 6) % 7)
-        self.start_time = format_time(start_hour, start_min)
-        self.end_time = format_time(end_hour, end_min)
-        self.start_dt = datetime.strptime(self.start_time, "%H:%M").time()
-        self.end_dt = datetime.strptime(self.end_time, "%H:%M").time()
-        self.state = state
-        self._toState()
+        return self._schedule[i]
 
     def __str__(self):
-        return str(self.start_day) + " - " + str(self.end_day) + " - " + str(self.start_time) + " - " + str(
-            self.end_time) + " - " + str(self.state)
+        return "\n".join(map(str, self._schedule))
 
-    def __lt__(self, other):
-        return (self.start_day < other.start_day) or (
-                self.start_day == other.start_day and self.start_time < other.start_time)
+    class ScheduleItem:
+        def __init__(self, data):
+            self.state = Schedule.STATES[data["targetState"]]
+            self.start_time = datetime.fromtimestamp(int(data["startTimeT"]), pytz.timezone('Europe/Amsterdam'))
+            self.end_time = datetime.fromtimestamp(int(data["endTimeT"]), pytz.timezone('Europe/Amsterdam'))
+            relative_day = (self.start_time.weekday() - datetime.now(
+                pytz.timezone("Europe/Amsterdam")).weekday() + 6) % 6
+            self.day = Schedule.RELATIVE_DAYS[relative_day] if 0 <= relative_day < 3 else Schedule.WEEKDAYS[
+                int(data["weekDay"])]
 
-    def __eq__(self, other):
-        return self.start_day == other.start_day and self.end_day == other.end_day and self.start_time == other.start_time and self.end_time == other.end_time
+        def __lt__(self, other):
+            return self.start_time < other.start_time
 
-    def _toState(self):
-        states = ["comfort", "thuis", "slapen", "weg"]
-        days = ["eergisteren", "gisteren", "vandaag", "morgen", "overmorgen"]
-        weekdays = ["maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"]
-        today = datetime.now(pytz.timezone('Europe/Amsterdam')).weekday()
+        def __eq__(self, other):
+            return self.start_time == other.start_time
 
-        self.state = states[int(self.state)]
-        try:
-            self.ha_start_day = days[(int(self.start_day) - today + 6) % 6 + 2]
-        except IndexError:
-            self.ha_start_day = weekdays[today]
-        
-        try:
-            self.ha_end_day = days[(int(self.end_day) - today + 6) % 6 + 2]
-        except IndexError:
-            self.ha_end_day = weekdays[today]
-        
-        self.ha_start_time = self.start_time
-        self.ha_end_time = self.end_time
+        def __str__(self):
+            return f"{self.state} | op {self.day} vanaf {self.start_time.strftime('%H:%M:%S')}"
+
+        def get_ha_attrs(self):
+            return {"start_day": self.day, "start_time": self.start_time.strftime("%H:%M")}
+
+        def get_ha_state(self):
+            return self.state
