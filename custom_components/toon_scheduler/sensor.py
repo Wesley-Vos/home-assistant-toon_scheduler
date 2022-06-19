@@ -223,7 +223,7 @@ class Schedule:
             self.start_time = datetime.fromtimestamp(int(data["startTimeT"]), pytz.timezone('Europe/Amsterdam'))
             self.end_time = datetime.fromtimestamp(int(data["endTimeT"]), pytz.timezone('Europe/Amsterdam'))
             relative_day = (self.start_time.weekday() - datetime.now(
-                pytz.timezone("Europe/Amsterdam")).weekday() + 6) % 6
+                pytz.timezone("Europe/Amsterdam")).weekday() + 7) % 7
             self.day = Schedule.RELATIVE_DAYS[relative_day] if 0 <= relative_day < 3 else Schedule.WEEKDAYS[
                 int(data["weekDay"])]
 
